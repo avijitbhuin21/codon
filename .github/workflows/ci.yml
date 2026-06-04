@@ -36,7 +36,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: llvm
-          key: linux-x86_64-llvm-codon
+          key: linux-x86_64-llvm-17
 
       - name: Build Dependencies (LLVM)
         if: steps.cache-llvm.outputs.cache-hit != 'true'
@@ -76,8 +76,8 @@ jobs:
           files: codon-linux-x86_64.tar.gz
 
   macos:
-    name: Build macOS (x86_64)
-    runs-on: macos-13
+    name: Build macOS (arm64)
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
 
@@ -94,7 +94,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: llvm
-          key: darwin-x86_64-llvm-17
+          key: darwin-arm64-llvm-17
 
       - name: Build Dependencies (LLVM)
         if: steps.cache-llvm.outputs.cache-hit != 'true'
@@ -117,20 +117,20 @@ jobs:
       - name: Package
         run: |
           rm -rf codon-deploy/lib/libfmt.a codon-deploy/lib/pkgconfig codon-deploy/lib/cmake
-          tar -czf codon-darwin-x86_64.tar.gz codon-deploy
+          tar -czf codon-darwin-arm64.tar.gz codon-deploy
           du -sh codon-deploy
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: codon-darwin-x86_64
-          path: codon-darwin-x86_64.tar.gz
+          name: codon-darwin-arm64
+          path: codon-darwin-arm64.tar.gz
 
       - name: Upload Release Asset
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: codon-darwin-x86_64.tar.gz
+          files: codon-darwin-arm64.tar.gz
 
   windows:
     name: Build Windows (MSVC x86_64)
