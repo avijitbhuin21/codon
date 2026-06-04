@@ -17,7 +17,9 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #include <unwind.h>
 #include <vector>
 
@@ -37,10 +39,15 @@
 // OpenMP patch with GC callbacks
 typedef int (*gc_setup_callback)(GC_stack_base *);
 typedef void (*gc_roots_callback)(void *, void *);
+#ifdef _WIN32
+extern "C" void __kmpc_set_gc_callbacks(gc_setup_callback, gc_setup_callback,
+                                        gc_roots_callback, gc_roots_callback) {}
+#else
 extern "C" void __kmpc_set_gc_callbacks(gc_setup_callback get_stack_base,
                                         gc_setup_callback register_thread,
                                         gc_roots_callback add_roots,
                                         gc_roots_callback del_roots);
+#endif
 
 void seq_exc_init();
 

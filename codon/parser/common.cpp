@@ -321,6 +321,7 @@ ImportFile getRoot(const std::string argv0, const std::vector<std::string> &plug
              "bad path substitution: {}, {}", s, root);
   auto module = s.substr(root.size() + 1, s.size() - root.size() - ext.size() - 1);
   std::replace(module.begin(), module.end(), '/', '.');
+  std::replace(module.begin(), module.end(), '\\', '.');
   return ImportFile{(!isStdLib && root == module0Root) ? ImportFile::PACKAGE
                                                        : ImportFile::STDLIB,
                     s, module};

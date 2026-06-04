@@ -8,7 +8,20 @@
 
 #include "codon/cir/llvm/llvm.h"
 
+namespace llvm {
+namespace orc {
+class ObjectLinkingLayer;
+} // namespace orc
+} // namespace llvm
+
 namespace codon {
+
+#ifdef _WIN32
+/// Register a JITLink plugin on the given layer that registers Win64 SEH unwind
+/// info (the `.pdata` table) of JIT-compiled code with the OS via
+/// RtlAddFunctionTable, so that exceptions can unwind through JIT'd funclets.
+void addWin64SEHRegistration(llvm::orc::ObjectLinkingLayer &layer);
+#endif
 
 /// Simple extension of LLVM's SectionMemoryManager which catches data section
 /// allocations and registers them with the GC. This allows the GC to know not

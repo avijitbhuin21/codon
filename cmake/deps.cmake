@@ -44,13 +44,18 @@ CPMAddPackage(
     GITHUB_REPOSITORY "Neargye/semver"
     GIT_TAG v0.3.0)
 
+if(WIN32)
+    set(_zlib_off64 "HAVE_OFF64_T OFF")
+else()
+    set(_zlib_off64 "HAVE_OFF64_T ON")
+endif()
 CPMAddPackage(
     NAME zlibng
     GITHUB_REPOSITORY "zlib-ng/zlib-ng"
     VERSION 2.1.2
     GIT_TAG 2.1.2
     EXCLUDE_FROM_ALL YES
-    OPTIONS "HAVE_OFF64_T ON"
+    OPTIONS "${_zlib_off64}"
             "ZLIB_COMPAT ON"
             "WITH_GTEST OFF"
             "ZLIB_ENABLE_TESTS OFF"
@@ -68,8 +73,12 @@ CPMAddPackage(
     OPTIONS "BUILD_SHARED_LIBS OFF"
             "CMAKE_POSITION_INDEPENDENT_CODE ON")
 if(xz_ADDED)
-    set_target_properties(xz PROPERTIES EXCLUDE_FROM_ALL ON)
-    set_target_properties(xzdec PROPERTIES EXCLUDE_FROM_ALL ON)
+    if(TARGET xz)
+        set_target_properties(xz PROPERTIES EXCLUDE_FROM_ALL ON)
+    endif()
+    if(TARGET xzdec)
+        set_target_properties(xzdec PROPERTIES EXCLUDE_FROM_ALL ON)
+    endif()
 endif()
 
 CPMAddPackage(
@@ -103,6 +112,7 @@ if (WIN32)
                 "enable_threads ON"
                 "enable_large_config ON"
                 "enable_thread_local_alloc ON"
+                "enable_parallel_mark OFF"
                 "disable_handle_fork ON"
                 "enable_single_obj_compilation on")
 else()
@@ -121,27 +131,28 @@ else()
 endif()
 if(bdwgc_ADDED)
     set_target_properties(cord PROPERTIES EXCLUDE_FROM_ALL ON)
-    # if(WIN32 AND NOT EXISTS "${bdwgc_SOURCE_DIR}/libatomic_ops")
-    #     file(COPY "${libatomic_ops_SOURCE_DIR}" DESTINATION "${bdwgc_SOURCE_DIR}/")
-    #     file(RENAME "${bdwgc_SOURCE_DIR}/libatomic_ops-src" "${bdwgc_SOURCE_DIR}/libatomic_ops")
-    # endif()
+    if(WIN32 AND TARGET gc)
+        target_compile_definitions(gc PRIVATE GC_BUILTIN_ATOMIC)
+    endif()
 endif()
 
-CPMAddPackage(
-    NAME openmp
-    GITHUB_REPOSITORY "exaloop/openmp"
-    GIT_TAG 376ec88480b9eeead8193a6bd4bb743efc6c5ea5
-    EXCLUDE_FROM_ALL YES
-    OPTIONS "CMAKE_BUILD_TYPE Release"
-            "OPENMP_ENABLE_LIBOMPTARGET OFF"
-            "OPENMP_STANDALONE_BUILD ON")
+if(NOT WIN32)
+  CPMAddPackage(
+      NAME openmp
+      GITHUB_REPOSITORY "exaloop/openmp"
+      GIT_TAG 376ec88480b9eeead8193a6bd4bb743efc6c5ea5
+      EXCLUDE_FROM_ALL YES
+      OPTIONS "CMAKE_BUILD_TYPE Release"
+              "OPENMP_ENABLE_LIBOMPTARGET OFF"
+              "OPENMP_STANDALONE_BUILD ON")
+endif()
 
 CPMAddPackage(
     NAME backtrace
     GITHUB_REPOSITORY "ianlancetaylor/libbacktrace"
     GIT_TAG d0f5e95a87a4d3e0a1ed6c069b5dae7cbab3ed2a
     DOWNLOAD_ONLY YES)
-if(backtrace_ADDED)
+if(backtrace_ADDED AND NOT WIN32)
     set(backtrace_SOURCES
         "${backtrace_SOURCE_DIR}/atomic.c"
         "${backtrace_SOURCE_DIR}/dwarf.c"

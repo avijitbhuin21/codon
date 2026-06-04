@@ -6,11 +6,19 @@
 #include <cctype>
 #include <cstdlib>
 #include <fmt/args.h>
-#include <unistd.h>
 #include <utility>
 
 #ifdef _WIN32
+#include <process.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #else
+#include <unistd.h>
 #include <sys/wait.h>
 #endif
 
@@ -412,7 +420,14 @@ void executeCommand(const std::vector<std::string> &args) {
   cArgs.push_back(nullptr);
 
 #ifdef _WIN32
-  /// TODO WIN32
+  intptr_t status = _spawnvp(_P_WAIT, cArgs[0], cArgs.data());
+  if (status < 0) {
+    compilationError("process for '" + args[0] + "' could not be started");
+  }
+  if (status != 0) {
+    compilationError("process for '" + args[0] + "' exited with status " +
+                     std::to_string(status));
+  }
 #else
   if (fork() == 0) {
     int status = execvp(cArgs[0], (char *const *)&cArgs[0]);
@@ -498,7 +513,11 @@ void LLVMVisitor::writeToExecutable(const std::string &filename,
     rpaths.push_back(std::string(path));
   }
 
+#ifdef _WIN32
+  std::vector<std::string> command = {"clang", "-fuse-ld=lld"};
+#else
   std::vector<std::string> command = {"g++"};
+#endif
   // Avoid "argument unused during compilation" warning
   command.push_back("-Wno-unused-command-line-argument");
   // MUST go before -llib to compile on Linux
@@ -510,7 +529,9 @@ void LLVMVisitor::writeToExecutable(const std::string &filename,
   for (const auto &rpath : rpaths) {
     if (!rpath.empty()) {
       command.push_back("-L" + rpath);
+#ifndef _WIN32
       command.push_back("-Wl,-rpath," + rpath);
+#endif
     }
   }
 
@@ -525,7 +546,9 @@ void LLVMVisitor::writeToExecutable(const std::string &filename,
       llvm::StringRef rpath = rpath0.str();
       if (!rpath.empty()) {
         command.push_back("-L" + rpath.str());
+#ifndef _WIN32
         command.push_back("-Wl,-rpath," + rpath.str());
+#endif
       }
     }
   }
@@ -553,8 +576,12 @@ void LLVMVisitor::writeToExecutable(const std::string &filename,
     }
   }
 
+#ifdef _WIN32
+  std::vector<std::string> extraArgs = {"-lcodonrt", "-o", filename};
+#else
   std::vector<std::string> extraArgs = {
       "-lcodonrt", "-lomp", "-lpthread", "-ldl", "-lz", "-lm", "-lc", "-o", filename};
+#endif
 
   for (const auto &arg : extraArgs) {
     command.push_back(arg);
@@ -570,8 +597,10 @@ void LLVMVisitor::writeToExecutable(const std::string &filename,
 
   // Avoid "relocation R_X86_64_32 against `.bss' can not be used when making a PIE
   // object" complaints by gcc when it is built with --enable-default-pie
+#ifndef _WIN32
   if (!library)
     command.push_back("-no-pie");
+#endif
 
   executeCommand(command);
 
@@ -1248,6 +1277,9 @@ void LLVMVisitor::run(const std::vector<std::string> &args,
           -> llvm::Expected<std::unique_ptr<llvm::orc::ObjectLayer>> {
         auto L = std::make_unique<llvm::orc::ObjectLinkingLayer>(
             es, llvm::cantFail(BoehmGCJITLinkMemoryManager::Create()));
+#ifdef _WIN32
+        addWin64SEHRegistration(*L);
+#endif
         /*
         L->addPlugin(std::make_unique<llvm::orc::EHFrameRegistrationPlugin>(
             es, llvm::cantFail(llvm::orc::EPCEHFrameRegistrar::Create(es))));
@@ -1259,7 +1291,11 @@ void LLVMVisitor::run(const std::vector<std::string> &args,
         */
         return L;
       });
-  builder.setJITTargetMachineBuilder(llvm::orc::JITTargetMachineBuilder(triple));
+  auto jtmb = llvm::orc::JITTargetMachineBuilder(triple);
+#ifdef _WIN32
+  jtmb.setCodeModel(llvm::CodeModel::Large);
+#endif
+  builder.setJITTargetMachineBuilder(std::move(jtmb));
   if (auto *orcRuntimeLibPath = std::getenv("CODON_ORC")) {
     builder.setPlatformSetUp(llvm::orc::ExecutorNativePlatform(orcRuntimeLibPath));
   }
@@ -1268,6 +1304,24 @@ void LLVMVisitor::run(const std::vector<std::string> &args,
   jit->getMainJITDylib().addGenerator(
       llvm::cantFail(llvm::orc::DynamicLibrarySearchGenerator::GetForCurrentProcess(
           jit->getDataLayout().getGlobalPrefix())));
+#ifdef _WIN32
+  {
+    uintptr_t handler = 0;
+    if (HMODULE crt = ::GetModuleHandleW(L"vcruntime140.dll"))
+      handler = reinterpret_cast<uintptr_t>(
+          ::GetProcAddress(crt, "__C_specific_handler"));
+    uintptr_t imageBase = handler
+                              ? (handler & ~0xFFFFFFFFull)
+                              : reinterpret_cast<uintptr_t>(
+                                    ::GetModuleHandleW(nullptr));
+    auto base = llvm::orc::ExecutorAddr(imageBase);
+    llvm::orc::SymbolMap winSymbols;
+    winSymbols[jit->getExecutionSession().intern("__ImageBase")] = {
+        base, llvm::JITSymbolFlags::Exported | llvm::JITSymbolFlags::Absolute};
+    llvm::cantFail(jit->getMainJITDylib().define(
+        llvm::orc::absoluteSymbols(std::move(winSymbols))));
+  }
+#endif
 
   llvm::cantFail(jit->addIRModule({std::move(M), std::move(context)}));
   clearLLVMData();
@@ -1305,7 +1359,29 @@ llvm::FunctionCallee LLVMVisitor::makeAllocFunc(bool atomic) {
   return f;
 }
 
+/// Returns true if the module targets the Windows MSVC (SEH) environment.
+static bool isWinMSVC(llvm::Module *M) {
+  return llvm::Triple(M->getTargetTriple()).isWindowsMSVCEnvironment();
+}
+
+/// True if a value of this LLVM type is passed/returned indirectly (by hidden
+/// pointer) under the Win64 calling convention: aggregates whose size is not 1,
+/// 2, 4, or 8 bytes. Codon's IR otherwise lowers small structs (e.g. seq_str_t,
+/// 16 bytes) into multiple registers (Itanium/SysV style), which mismatches the
+/// MSVC-compiled runtime DLL across the @C boundary.
+static bool win64IsIndirect(llvm::Module *M, llvm::Type *t) {
+  if (!t->isAggregateType())
+    return false;
+  uint64_t size = M->getDataLayout().getTypeAllocSize(t);
+  return size > 8;
+}
+
 llvm::FunctionCallee LLVMVisitor::makePersonalityFunc() {
+  if (isWinMSVC(&*M)) {
+    return M->getOrInsertFunction(
+        "__C_specific_handler",
+        llvm::FunctionType::get(B->getInt32Ty(), /*isVarArg=*/true));
+  }
   return M->getOrInsertFunction("seq_personality", B->getInt32Ty(), B->getInt32Ty(),
                                 B->getInt32Ty(), B->getInt64Ty(), B->getInt8PtrTy(),
                                 B->getInt8PtrTy());
@@ -1569,12 +1645,32 @@ void LLVMVisitor::visit(const Module *x) {
     B->CreateInvoke(realMain, normal, unwind);
 
     B->SetInsertPoint(unwind);
-    llvm::LandingPadInst *caughtResult = B->CreateLandingPad(getPadType(), 1);
-    caughtResult->setCleanup(true);
-    caughtResult->addClause(getTypeIdxVar(nullptr));
-    llvm::Value *unwindException = B->CreateExtractValue(caughtResult, 0);
-    B->CreateCall(makeTerminateFunc(), unwindException);
-    B->CreateUnreachable();
+    if (isWinMSVC(&*M)) {
+      auto *cs =
+          B->CreateCatchSwitch(llvm::ConstantTokenNone::get(*context), nullptr, 1);
+      auto *catchBlock = llvm::BasicBlock::Create(*context, "catch", proxyMain);
+      cs->addHandler(catchBlock);
+      B->SetInsertPoint(catchBlock);
+      auto *filter =
+          M->getOrInsertFunction(
+               "seq_exc_filter",
+               llvm::FunctionType::get(
+                   B->getInt32Ty(), {B->getInt8PtrTy(), B->getInt8PtrTy()}, false))
+              .getCallee();
+      auto *cp = B->CreateCatchPad(cs, {filter});
+      llvm::OperandBundleDef bundle("funclet", llvm::ArrayRef<llvm::Value *>(cp));
+      auto excCurrent = M->getOrInsertFunction("seq_exc_current", B->getInt8PtrTy());
+      auto *unwindException = B->CreateCall(excCurrent, {}, {bundle});
+      B->CreateCall(makeTerminateFunc(), {unwindException}, {bundle});
+      B->CreateUnreachable();
+    } else {
+      llvm::LandingPadInst *caughtResult = B->CreateLandingPad(getPadType(), 1);
+      caughtResult->setCleanup(true);
+      caughtResult->addClause(getTypeIdxVar(nullptr));
+      llvm::Value *unwindException = B->CreateExtractValue(caughtResult, 0);
+      B->CreateCall(makeTerminateFunc(), unwindException);
+      B->CreateUnreachable();
+    }
 
     B->SetInsertPoint(normal);
     B->CreateRetVoid();
@@ -1624,12 +1720,46 @@ llvm::Function *LLVMVisitor::makeLLVMFunction(const Func *x) {
     argTypes.push_back(getLLVMType(argType));
   }
 
-  auto *llvmFuncType =
-      llvm::FunctionType::get(returnType, argTypes, funcType->isVariadic());
   const std::string functionName = getNameForFunction(x);
+  const bool isExternal = bool(cast<ExternalFunc>(x));
+  const bool winABI = isExternal && isWinMSVC(M.get()) && !funcType->isVariadic();
+
+  llvm::FunctionType *llvmFuncType = nullptr;
+  std::vector<std::pair<unsigned, llvm::Type *>> byvalArgs;
+  llvm::Type *sretType = nullptr;
+  if (winABI) {
+    std::vector<llvm::Type *> abiArgs;
+    llvm::Type *abiRet = returnType;
+    if (win64IsIndirect(M.get(), returnType)) {
+      sretType = returnType;
+      abiRet = B->getVoidTy();
+      abiArgs.push_back(returnType->getPointerTo());
+    }
+    for (auto *at : argTypes) {
+      if (win64IsIndirect(M.get(), at)) {
+        byvalArgs.emplace_back((unsigned)abiArgs.size(), at);
+        abiArgs.push_back(at->getPointerTo());
+      } else {
+        abiArgs.push_back(at);
+      }
+    }
+    llvmFuncType = llvm::FunctionType::get(abiRet, abiArgs, /*isVarArg=*/false);
+  } else {
+    llvmFuncType =
+        llvm::FunctionType::get(returnType, argTypes, funcType->isVariadic());
+  }
+
   auto *f = llvm::cast<llvm::Function>(
       M->getOrInsertFunction(functionName, llvmFuncType).getCallee());
-  if (!cast<ExternalFunc>(x)) {
+  if (winABI) {
+    if (sretType)
+      f->addParamAttr(0, llvm::Attribute::get(*context,
+                                              llvm::Attribute::StructRet, sretType));
+    for (auto &bv : byvalArgs)
+      f->addParamAttr(bv.first, llvm::Attribute::get(*context,
+                                                     llvm::Attribute::ByVal, bv.second));
+  }
+  if (!isExternal) {
     f->setSubprogram(getDISubprogramForFunc(x));
   }
   return f;
@@ -2804,7 +2934,21 @@ void LLVMVisitor::visit(const TryCatchFlow *x) {
 
   // rethrow if uncaught
   B->SetInsertPoint(unwindResumeBlock);
-  B->CreateResume(B->CreateLoad(padType, tc.catchStore));
+  block = unwindResumeBlock;
+  if (isWinMSVC(&*M)) {
+    // No landingpad value to `resume` under WinEH. Re-raise the stored unwind
+    // exception via seq_throw. This tc has already been popped (exitTryCatch
+    // above), so call() routes the re-raise to the enclosing try-catch's
+    // catchswitch (or, at the root, a plain call that the personality/proxy-main
+    // catch-all handles).
+    llvm::Value *exc =
+        B->CreateExtractValue(B->CreateLoad(padType, tc.catchStore), 0);
+    call(makeThrowFunc(), {exc});
+    B->SetInsertPoint(block);
+    B->CreateUnreachable();
+  } else {
+    B->CreateResume(B->CreateLoad(padType, tc.catchStore));
+  }
 
   // make sure we delegate to parent try-catch if necessary
   std::vector<types::Type *> catchTypesFull(tc.catchTypes);
@@ -2842,21 +2986,67 @@ void LLVMVisitor::visit(const TryCatchFlow *x) {
 
   // exception handling
   B->SetInsertPoint(tc.exceptionBlock);
-  llvm::LandingPadInst *caughtResult = B->CreateLandingPad(padType, catches.size());
-  caughtResult->setCleanup(true);
-  std::vector<llvm::Value *> typeIndices;
+  llvm::Value *unwindException = nullptr;
+  if (isWinMSVC(&*M)) {
+    // Win64 SEH/funclet form: the try-body invokes unwind here to a catchswitch.
+    // We use a single catchpad with the Codon SEH filter (seq_exc_filter), then
+    // immediately catchret out of the funclet into normal code, where the Codon
+    // exception object is recovered from TLS via seq_exc_current(). All dispatch
+    // (type-id matching, finally, nesting via delegateDepth) then runs as ordinary
+    // (non-funclet) code, so no "funclet" operand bundles are needed downstream.
+    auto *cs =
+        B->CreateCatchSwitch(llvm::ConstantTokenNone::get(*context), nullptr, 1);
+    auto *catchBlock = llvm::BasicBlock::Create(*context, "trycatch.catchpad", func);
+    cs->addHandler(catchBlock);
+    B->SetInsertPoint(catchBlock);
+    auto *filter =
+        M->getOrInsertFunction(
+             "seq_exc_filter",
+             llvm::FunctionType::get(
+                 B->getInt32Ty(), {B->getInt8PtrTy(), B->getInt8PtrTy()}, false))
+            .getCallee();
+    auto *cp = B->CreateCatchPad(cs, {filter});
+    // Recover the in-flight exception (stashed in TLS by seq_throw) and store it
+    // into catchStore *inside* the funclet. Calls executed inside a catch funclet
+    // must carry a ["funclet"(token)] operand bundle for WinEHPrepare; doing real
+    // work here (rather than an immediate empty catchret) also ensures the catch
+    // scope is properly emitted into the function's SEH scope table.
+    llvm::OperandBundleDef bundle("funclet", llvm::ArrayRef<llvm::Value *>(cp));
+    auto excCurrent = M->getOrInsertFunction("seq_exc_current", B->getInt8PtrTy());
+    unwindException = B->CreateCall(excCurrent, {}, {bundle});
+    // Mirror the Itanium catchStore layout: { i8* unwindException, i32 0 }.
+    llvm::Value *padVal = llvm::UndefValue::get(padType);
+    padVal = B->CreateInsertValue(padVal, unwindException, 0);
+    padVal = B->CreateInsertValue(padVal, B->getInt32(0), 1);
+    B->CreateStore(padVal, tc.catchStore);
 
-  for (auto *catchType : catchTypesFull) {
-    seqassertn(!catchType || cast<types::RefType>(catchType), "invalid catch type");
-    const std::string typeVarName =
-        "codon.typeidx." + (catchType ? catchType->getName() : "<all>");
-    llvm::GlobalVariable *tidx = getTypeIdxVar(catchType);
-    typeIndices.push_back(tidx);
-    caughtResult->addClause(tidx);
+    auto *routeContinue =
+        llvm::BasicBlock::Create(*context, "trycatch.catchret", func);
+    B->CreateCatchRet(llvm::cast<llvm::CatchPadInst>(cp), routeContinue);
+
+    // Normal (non-funclet) code resumes here for Codon's own type-id dispatch.
+    B->SetInsertPoint(routeContinue);
+    // The funclet-local SSA value cannot be used outside the funclet; reload the
+    // unwind-exception pointer from catchStore for the foreign-class check below.
+    unwindException =
+        B->CreateExtractValue(B->CreateLoad(padType, tc.catchStore), 0);
+  } else {
+    llvm::LandingPadInst *caughtResult = B->CreateLandingPad(padType, catches.size());
+    caughtResult->setCleanup(true);
+    std::vector<llvm::Value *> typeIndices;
+
+    for (auto *catchType : catchTypesFull) {
+      seqassertn(!catchType || cast<types::RefType>(catchType), "invalid catch type");
+      const std::string typeVarName =
+          "codon.typeidx." + (catchType ? catchType->getName() : "<all>");
+      llvm::GlobalVariable *tidx = getTypeIdxVar(catchType);
+      typeIndices.push_back(tidx);
+      caughtResult->addClause(tidx);
+    }
+
+    unwindException = B->CreateExtractValue(caughtResult, 0);
+    B->CreateStore(caughtResult, tc.catchStore);
   }
-
-  llvm::Value *unwindException = B->CreateExtractValue(caughtResult, 0);
-  B->CreateStore(caughtResult, tc.catchStore);
   B->CreateStore(excStateThrown, tc.excFlag);
   llvm::Value *depthMax = B->getInt64(trycatch.size());
   B->CreateStore(depthMax, tc.delegateDepth);
@@ -3108,6 +3298,55 @@ void LLVMVisitor::visit(const CallInstr *x) {
   }
 
   auto *funcType = getLLVMFuncType(x->getCallee()->getType());
+
+  auto *callee = util::getFunc(x->getCallee());
+  const bool winABI = callee && isA<ExternalFunc>(callee) && isWinMSVC(M.get()) &&
+                      !funcType->isVarArg();
+  if (winABI) {
+    B->SetInsertPoint(block);
+    llvm::Type *retType = funcType->getReturnType();
+    bool sret = win64IsIndirect(M.get(), retType);
+
+    std::vector<llvm::Type *> abiArgs;
+    std::vector<llvm::Value *> abiVals;
+    std::vector<std::pair<unsigned, llvm::Type *>> byvalIdx;
+
+    llvm::Value *sretSlot = nullptr;
+    if (sret) {
+      sretSlot = B->CreateAlloca(retType);
+      abiArgs.push_back(retType->getPointerTo());
+      abiVals.push_back(sretSlot);
+    }
+    for (auto *a : args) {
+      llvm::Type *at = a->getType();
+      if (win64IsIndirect(M.get(), at)) {
+        auto *slot = B->CreateAlloca(at);
+        B->CreateStore(a, slot);
+        byvalIdx.emplace_back((unsigned)abiArgs.size(), at);
+        abiArgs.push_back(at->getPointerTo());
+        abiVals.push_back(slot);
+      } else {
+        abiArgs.push_back(at);
+        abiVals.push_back(a);
+      }
+    }
+
+    auto *abiFuncType = llvm::FunctionType::get(
+        sret ? B->getVoidTy() : retType, abiArgs, /*isVarArg=*/false);
+    auto *result = call({abiFuncType, f}, abiVals);
+    if (auto *ci = llvm::dyn_cast<llvm::CallBase>(result)) {
+      if (sret)
+        ci->addParamAttr(0, llvm::Attribute::get(*context, llvm::Attribute::StructRet,
+                                                 retType));
+      for (auto &bv : byvalIdx)
+        ci->addParamAttr(bv.first, llvm::Attribute::get(*context,
+                                                        llvm::Attribute::ByVal, bv.second));
+    }
+    B->SetInsertPoint(block);
+    value = sret ? (llvm::Value *)B->CreateLoad(retType, sretSlot) : result;
+    return;
+  }
+
   value = call({funcType, f}, args);
 }
 

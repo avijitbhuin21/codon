@@ -30,6 +30,10 @@ private:
 
   static void handleLazyCallThroughError();
 
+#ifdef _WIN32
+  void defineImageBase();
+#endif
+
   static llvm::Expected<llvm::orc::ThreadSafeModule>
   optimizeModule(llvm::orc::ThreadSafeModule module,
                  const llvm::orc::MaterializationResponsibility &R);

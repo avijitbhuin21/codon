@@ -26,6 +26,14 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fno-limit-debug-info")
 endif()
 set(CMAKE_CXX_FLAGS_RELEASE "-O3")
+if(WIN32)
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fms-runtime-lib=dll")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fms-runtime-lib=dll")
+  add_compile_definitions(GC_NOT_DLL)
+  set(_codon_win_crt "-lmsvcrt -lvcruntime -lucrt -lmsvcprt -loldnames -llegacy_stdio_definitions")
+  set(CMAKE_C_STANDARD_LIBRARIES "${CMAKE_C_STANDARD_LIBRARIES} ${_codon_win_crt}")
+  set(CMAKE_CXX_STANDARD_LIBRARIES "${CMAKE_CXX_STANDARD_LIBRARIES} ${_codon_win_crt}")
+endif()
 include_directories(.)
 
 set(APPLE_ARM OFF)
@@ -71,21 +79,36 @@ add_custom_command(
 # Codon Jupyter library
 set(CODON_JUPYTER_FILES codon/util/jupyter.h codon/util/jupyter.cpp)
 add_library(codon_jupyter SHARED ${CODON_JUPYTER_FILES})
+if(WIN32)
+  set_target_properties(codon_jupyter PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
 
 # Codon runtime library
 set(CODONRT_FILES codon/runtime/lib.h codon/runtime/lib.cpp
                   codon/runtime/re.cpp codon/runtime/exc.cpp
                   codon/runtime/gpu.cpp)
 add_library(codonrt SHARED ${CODONRT_FILES})
-add_dependencies(codonrt zlibstatic gc backtrace bz2 liblzma re2)
+if(WIN32)
+  set_target_properties(codonrt PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
+if(WIN32)
+  add_dependencies(codonrt zlibstatic gc bz2 liblzma re2)
+else()
+  add_dependencies(codonrt zlibstatic gc backtrace bz2 liblzma re2)
+endif()
 if(APPLE AND APPLE_ARM)
   add_dependencies(codonrt unwind_shared)
 endif()
 target_include_directories(codonrt PRIVATE ${backtrace_SOURCE_DIR}
                                            ${re2_SOURCE_DIR}
                                            "${gc_SOURCE_DIR}/include" runtime)
-target_link_libraries(codonrt PRIVATE fmt omp backtrace ${STATIC_LIBCPP}
-                                      LLVMSupport)
+if(WIN32)
+  target_link_libraries(codonrt PRIVATE fmt ${STATIC_LIBCPP}
+                                        LLVMSupport)
+else()
+  target_link_libraries(codonrt PRIVATE fmt omp backtrace ${STATIC_LIBCPP}
+                                        LLVMSupport)
+endif()
 if(APPLE)
   target_link_libraries(
     codonrt
@@ -94,6 +117,14 @@ if(APPLE)
             -Wl,-force_load,$<TARGET_FILE:bz2>
             -Wl,-force_load,$<TARGET_FILE:liblzma>
             -Wl,-force_load,$<TARGET_FILE:re2>)
+elseif(WIN32)
+  target_link_libraries(
+    codonrt
+    PRIVATE $<TARGET_FILE:gc>
+            -Wl,/WHOLEARCHIVE:$<TARGET_FILE:zlibstatic>
+            -Wl,/WHOLEARCHIVE:$<TARGET_FILE:bz2>
+            -Wl,/WHOLEARCHIVE:$<TARGET_FILE:liblzma>
+            -Wl,/WHOLEARCHIVE:$<TARGET_FILE:re2>)
 else()
   target_link_libraries(
     codonrt
@@ -114,11 +145,13 @@ if(CODON_GPU)
   find_package(CUDAToolkit REQUIRED)
   target_link_libraries(codonrt PRIVATE CUDA::cudart_static CUDA::cuda_driver)
 endif()
-add_custom_command(
-  TARGET codonrt
-  POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:omp>
-          ${CMAKE_BINARY_DIR})
+if(NOT WIN32)
+  add_custom_command(
+    TARGET codonrt
+    POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:omp>
+            ${CMAKE_BINARY_DIR})
+endif()
 if(APPLE AND APPLE_ARM)
   add_custom_command(
     TARGET codonrt
@@ -326,6 +359,10 @@ set(CODON_CPPFILES
     codon/cir/var.cpp
     codon/util/common.cpp)
 add_library(codonc SHARED ${CODON_HPPFILES})
+if(WIN32)
+  set_target_properties(codonc PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+  target_compile_definitions(codonc PRIVATE CODON_COMPILER_BUILD)
+endif()
 target_include_directories(codonc PRIVATE ${peglib_SOURCE_DIR} ${toml_SOURCE_DIR}/include ${semver_SOURCE_DIR}/include)
 target_sources(codonc PRIVATE ${CODON_CPPFILES} codon_rules.cpp omp_rules.cpp)
 if(ASAN)
@@ -378,37 +415,65 @@ else()
 endif()
 
 # Gather headers
-add_custom_target(
-  headers ALL
-  COMMENT "Collecting headers"
-  BYPRODUCTS "${CMAKE_BINARY_DIR}/include"
-  VERBATIM
-  COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/include/codon"
-  COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/codon"
-          "${CMAKE_BINARY_DIR}/include/codon"
-  COMMAND find "${CMAKE_BINARY_DIR}/include" -type f ! -name "*.h" -exec rm {}
-          \\;)
+if(WIN32)
+  add_custom_target(
+    headers ALL
+    COMMENT "Collecting headers"
+    BYPRODUCTS "${CMAKE_BINARY_DIR}/include"
+    VERBATIM
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/include/codon"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/codon"
+            "${CMAKE_BINARY_DIR}/include/codon")
+else()
+  add_custom_target(
+    headers ALL
+    COMMENT "Collecting headers"
+    BYPRODUCTS "${CMAKE_BINARY_DIR}/include"
+    VERBATIM
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/include/codon"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/codon"
+            "${CMAKE_BINARY_DIR}/include/codon"
+    COMMAND find "${CMAKE_BINARY_DIR}/include" -type f ! -name "*.h" -exec rm {}
+            \\;)
+endif()
 add_dependencies(headers codonrt codonc)
 
 # Prepare lib directory for plugin compilation
-add_custom_target(
-  libs ALL
-  COMMENT "Collecting libraries"
-  BYPRODUCTS "${CMAKE_BINARY_DIR}/lib"
-  VERBATIM
-  COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/lib/codon"
-  COMMAND
-    ${CMAKE_COMMAND} -E copy
-    "${CMAKE_BINARY_DIR}/libcodonc${CMAKE_SHARED_LIBRARY_SUFFIX}"
-    "${CMAKE_BINARY_DIR}/lib/codon"
-  COMMAND
-    ${CMAKE_COMMAND} -E copy
-    "${CMAKE_BINARY_DIR}/libcodonrt${CMAKE_SHARED_LIBRARY_SUFFIX}"
-    "${CMAKE_BINARY_DIR}/lib/codon"
-  COMMAND
-    ${CMAKE_COMMAND} -E copy
-    "${CMAKE_BINARY_DIR}/libomp${CMAKE_SHARED_LIBRARY_SUFFIX}"
-    "${CMAKE_BINARY_DIR}/lib/codon")
+if(WIN32)
+  add_custom_target(
+    libs ALL
+    COMMENT "Collecting libraries"
+    BYPRODUCTS "${CMAKE_BINARY_DIR}/lib"
+    VERBATIM
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/lib/codon"
+    COMMAND
+      ${CMAKE_COMMAND} -E copy
+      "$<TARGET_FILE:codonc>"
+      "${CMAKE_BINARY_DIR}/lib/codon"
+    COMMAND
+      ${CMAKE_COMMAND} -E copy
+      "$<TARGET_FILE:codonrt>"
+      "${CMAKE_BINARY_DIR}/lib/codon")
+else()
+  add_custom_target(
+    libs ALL
+    COMMENT "Collecting libraries"
+    BYPRODUCTS "${CMAKE_BINARY_DIR}/lib"
+    VERBATIM
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/lib/codon"
+    COMMAND
+      ${CMAKE_COMMAND} -E copy
+      "${CMAKE_BINARY_DIR}/libcodonc${CMAKE_SHARED_LIBRARY_SUFFIX}"
+      "${CMAKE_BINARY_DIR}/lib/codon"
+    COMMAND
+      ${CMAKE_COMMAND} -E copy
+      "${CMAKE_BINARY_DIR}/libcodonrt${CMAKE_SHARED_LIBRARY_SUFFIX}"
+      "${CMAKE_BINARY_DIR}/lib/codon"
+    COMMAND
+      ${CMAKE_COMMAND} -E copy
+      "${CMAKE_BINARY_DIR}/libomp${CMAKE_SHARED_LIBRARY_SUFFIX}"
+      "${CMAKE_BINARY_DIR}/lib/codon")
+endif()
 add_dependencies(libs codonrt codonc)
 
 if(APPLE AND APPLE_ARM)
@@ -427,7 +492,11 @@ endif()
 
 # Codon command-line tool
 add_executable(codon codon/app/main.cpp)
-target_link_libraries(codon PUBLIC ${STATIC_LIBCPP} fmt codonc codon_jupyter Threads::Threads)
+if(WIN32)
+  target_link_libraries(codon PUBLIC fmt codonc codon_jupyter Threads::Threads ${LLVM_LIBS})
+else()
+  target_link_libraries(codon PUBLIC ${STATIC_LIBCPP} fmt codonc codon_jupyter Threads::Threads)
+endif()
 
 # Codon test Download and unpack googletest at configure time
 include(FetchContent)
@@ -456,7 +525,11 @@ set(CODON_TEST_CPPFILES
     test/cir/value.cpp
     test/cir/var.cpp
     test/types.cpp)
-add_executable(codon_test ${CODON_TEST_CPPFILES})
+if(WIN32)
+  add_executable(codon_test EXCLUDE_FROM_ALL ${CODON_TEST_CPPFILES})
+else()
+  add_executable(codon_test ${CODON_TEST_CPPFILES})
+endif()
 target_include_directories(codon_test PRIVATE test/cir
                                               "${gc_SOURCE_DIR}/include")
 target_link_libraries(codon_test fmt codonc codonrt gtest_main)
@@ -464,7 +537,9 @@ target_compile_definitions(codon_test
                            PRIVATE TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test")
 
 install(TARGETS codonrt codonc codon_jupyter DESTINATION lib/codon)
-install(FILES ${CMAKE_BINARY_DIR}/libomp${CMAKE_SHARED_LIBRARY_SUFFIX} DESTINATION lib/codon)
+if(NOT WIN32)
+  install(FILES ${CMAKE_BINARY_DIR}/libomp${CMAKE_SHARED_LIBRARY_SUFFIX} DESTINATION lib/codon)
+endif()
 install(TARGETS codon DESTINATION bin)
 install(DIRECTORY ${CMAKE_BINARY_DIR}/include/codon DESTINATION include)
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/stdlib DESTINATION lib/codon)
