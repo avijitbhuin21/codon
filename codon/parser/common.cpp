@@ -3,6 +3,8 @@
 #include "common.h"
 
 #include <cinttypes>
+#include <climits>
+#include <limits.h>
 #include <string>
 #include <vector>
 
@@ -14,6 +16,10 @@
 #define WIN32_LEAN_AND_MEAN
 #include <intrin.h>
 #include <windows.h>
+#endif
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
 #endif
 
 namespace codon::ast {

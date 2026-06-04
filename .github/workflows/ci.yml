@@ -45,6 +45,13 @@ jobs:
           CC: clang
           CXX: clang++
 
+      - name: Save LLVM cache
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: llvm
+          key: linux-x86_64-llvm-17
+
       - name: Build Codon
         run: |
           mkdir -p build
