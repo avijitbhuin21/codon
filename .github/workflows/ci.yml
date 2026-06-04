@@ -94,7 +94,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: llvm
-          key: darwin-x86_64-llvm-codon
+          key: darwin-x86_64-llvm-17
 
       - name: Build Dependencies (LLVM)
         if: steps.cache-llvm.outputs.cache-hit != 'true'
