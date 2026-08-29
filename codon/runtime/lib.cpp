@@ -30,6 +30,8 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#include <windows.h>
+#include <tlhelp32.h>
 #endif
 #define GC_THREADS
 #include "codon/runtime/lib.h"
@@ -76,6 +78,133 @@ extern "C" long long getline(char **lineptr, size_t *n, FILE *stream) {
     return -1;
   (*lineptr)[pos] = '\0';
   return (long long)pos;
+}
+
+// POSIX dl*(3) shims over the Win32 loader. Codon's stdlib (internal/dlopen.codon,
+// and through it internal/python.codon) resolves these via `from C import`, so they
+// must exist as codonrt exports for both AOT and the JIT's process symbol resolver.
+// Without them every `import python` / `from python import ...` program fails to
+// materialize with "Symbols not found: [ dlopen, dlsym, dlerror ]".
+namespace {
+std::string &dlErrorSlot() {
+  static thread_local std::string message;
+  return message;
+}
+
+void dlSetError(const char *what) {
+  DWORD code = GetLastError();
+  char *text = nullptr;
+  FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+                     FORMAT_MESSAGE_IGNORE_INSERTS,
+                 nullptr, code, 0, (char *)&text, 0, nullptr);
+  std::string detail = text ? text : "unknown error";
+  if (text)
+    LocalFree(text);
+  while (!detail.empty() && (detail.back() == '\n' || detail.back() == '\r'))
+    detail.pop_back();
+  dlErrorSlot() = std::string(what) + ": " + detail;
+}
+
+// POSIX dlopen(NULL) yields the process-global scope; Win32 has no single handle for
+// that, so dlsym walks every loaded module when handed the executable's handle.
+FARPROC dlSymGlobal(const char *symbol) {
+  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
+  if (snapshot == INVALID_HANDLE_VALUE)
+    return nullptr;
+  MODULEENTRY32 entry;
+  entry.dwSize = sizeof(entry);
+  FARPROC found = nullptr;
+  if (Module32First(snapshot, &entry)) {
+    do {
+      if (FARPROC p = GetProcAddress(entry.hModule, symbol)) {
+        found = p;
+        break;
+      }
+    } while (Module32Next(snapshot, &entry));
+  }
+  CloseHandle(snapshot);
+  return found;
+}
+} // namespace
+
+extern "C" void *dlopen(const char *filename, int flags) {
+  (void)flags;
+  HMODULE handle = nullptr;
+  if (filename) {
+    // LoadLibrary does not accept forward slashes in a path, but callers coming
+    // from POSIX code (and codon's own stdlib) routinely pass e.g. "./libfoo.dll".
+    std::string path(filename);
+    for (char &c : path)
+      if (c == '/')
+        c = '\\';
+    handle = LoadLibraryA(path.c_str());
+  } else {
+    handle = GetModuleHandleA(nullptr);
+  }
+  if (!handle)
+    dlSetError(filename ? filename : "dlopen(NULL)");
+  return (void *)handle;
+}
+
+extern "C" void *dlsym(void *handle, const char *symbol) {
+  if (!symbol) {
+    dlErrorSlot() = "dlsym: null symbol";
+    return nullptr;
+  }
+  HMODULE module = (HMODULE)handle;
+  FARPROC address = module ? GetProcAddress(module, symbol) : nullptr;
+  if (!address && (!module || module == GetModuleHandleA(nullptr)))
+    address = dlSymGlobal(symbol);
+  if (!address)
+    dlSetError(symbol);
+  return (void *)address;
+}
+
+extern "C" int dlclose(void *handle) {
+  if (handle && !FreeLibrary((HMODULE)handle)) {
+    dlSetError("dlclose");
+    return 1;
+  }
+  return 0;
+}
+
+extern "C" char *dlerror() {
+  std::string &message = dlErrorSlot();
+  if (message.empty())
+    return nullptr;
+  return const_cast<char *>(message.c_str());
+}
+
+// Mirrors the field order of internal/dlopen.codon's DL_info.
+struct seq_dl_info {
+  const char *dli_fname;
+  void *dli_fbase;
+  const char *dli_sname;
+  void *dli_saddr;
+  int dli_version;
+  int dli_reserved1;
+  int *dli_reserved;
+};
+
+extern "C" int dladdr(void *address, seq_dl_info *info) {
+  if (!info)
+    return 0;
+  HMODULE module = nullptr;
+  if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                              GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                          (LPCSTR)address, &module))
+    return 0;
+  static thread_local char path[MAX_PATH];
+  if (!GetModuleFileNameA(module, path, MAX_PATH))
+    return 0;
+  info->dli_fname = path;
+  info->dli_fbase = (void *)module;
+  info->dli_sname = nullptr;
+  info->dli_saddr = nullptr;
+  info->dli_version = 0;
+  info->dli_reserved1 = 0;
+  info->dli_reserved = nullptr;
+  return 1;
 }
 #endif
 
