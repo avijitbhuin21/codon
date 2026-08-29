@@ -5,6 +5,7 @@ on:
     branches:
       - master
       - develop
+      - win-fulltest
     tags:
       - '*'
   pull_request:
@@ -177,13 +178,24 @@ jobs:
       - name: Test
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           # codon_test is EXCLUDE_FROM_ALL on Windows (it statically links the compiler),
-          # so build it explicitly and run the fast in-process IR suite.
+          # so it has to be built explicitly.
           cmake --build build --config Release --target codon_test
           $env:PATH = "$PWD\build;$env:PATH"
           $env:CODON_PATH = "$PWD\stdlib"
-          & build/codon_test.exe --gtest_filter=CIRCoreTest.*
-          if ($LASTEXITCODE -ne 0) { throw "CIRCoreTest failed" }
+          # Mirror .github/build-linux/test.sh. find-python-library.py does not work on
+          # Windows (sysconfig LIBPL is unset), so locate pythonXY.dll directly.
+          $env:CODON_PYTHON = python -c "import sys, os; print(os.path.join(sys.base_prefix, 'python{}{}.dll'.format(*sys.version_info[:2])))"
+          $env:PYTHONPATH = "$PWD\test\python"
+          python -m pip install --upgrade pip
+          python -m pip install numpy==2.0.2
+          # test/core/serialization.codon writes into ./build (which already exists here),
+          # and test_import's C-dylib case dlopens ./libcodonrt.dll (test.sh symlinks the
+          # .so on Linux).
+          Copy-Item build/codonrt.dll libcodonrt.dll -Force
+          & build/codon_test.exe
+          if ($LASTEXITCODE -ne 0) { throw "codon_test failed" }
 
       - name: Package
         shell: pwsh
