@@ -96,6 +96,8 @@ jobs:
     name: Build Codon (Windows)
     runs-on: windows-latest
     needs: create_release
+    # Fail fast rather than burning the full 6h runner budget if a test hangs.
+    timeout-minutes: 180
     permissions:
       contents: write
     steps:
@@ -145,6 +147,18 @@ jobs:
             -DLLVM_ENABLE_PROJECTS=""
           cmake --build llvm-build --config Release
           cmake --install llvm-build --prefix llvm
+          # exaloop's libomp omits __kmpc_omp_task_alloc_size from the Windows export
+          # list (Linux/macOS do not gate exports on dllexports), so codon's task-based
+          # @par - exercised by test/core/pipeline.codon - cannot resolve it from the
+          # JIT or AOT. Add it to the no-ordinal section before building.
+          $exports = "llvm-project/openmp/runtime/src/dllexports"
+          $anchor = "__kmpc_push_num_threads_list"
+          if (-not (Select-String -Path $exports -Pattern $anchor -Quiet)) {
+            throw "libomp dllexports anchor '$anchor' not found"
+          }
+          if (-not (Select-String -Path $exports -Pattern "__kmpc_omp_task_alloc_size" -Quiet)) {
+            (Get-Content $exports) -replace "^(\s*)$anchor\s*$", "`$1__kmpc_omp_task_alloc_size`r`n`$1$anchor" | Set-Content $exports
+          }
           # GC-patched libomp (enables @par). Built standalone with clang-cl so CMake sets
           # MSVC=TRUE -> KMP_MSVC_COMPAT=1 (the pid_t shim etc.); a plain clang build fails.
           cmake -S llvm-project/openmp -B libomp-build -G Ninja `
