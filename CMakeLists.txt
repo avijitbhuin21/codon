@@ -263,7 +263,11 @@ elseif(WIN32)
             -Wl,/EXPORT:gzerror
             -Wl,/INCLUDE:BZ2_bzopen
             -Wl,/EXPORT:BZ2_bzopen -Wl,/EXPORT:BZ2_bzclose -Wl,/EXPORT:BZ2_bzread
-            -Wl,/EXPORT:BZ2_bzwrite -Wl,/EXPORT:BZ2_bzflush -Wl,/EXPORT:BZ2_bzerror)
+            -Wl,/EXPORT:BZ2_bzwrite -Wl,/EXPORT:BZ2_bzflush -Wl,/EXPORT:BZ2_bzerror
+            # hypotf is a static wrapper in the UCRT import lib rather than a
+            # ucrtbase.dll export, so the JIT cannot resolve it for complex64
+            # (test/stdlib/cmath_test.codon). Pull it in and export it.
+            -Wl,/INCLUDE:hypotf -Wl,/EXPORT:hypotf)
 else()
   add_dependencies(codonrt openblas_64)
 
