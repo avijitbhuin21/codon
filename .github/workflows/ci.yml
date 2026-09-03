@@ -208,7 +208,12 @@ jobs:
           # and test_import's C-dylib case dlopens ./libcodonrt.dll (test.sh symlinks the
           # .so on Linux).
           Copy-Item build/codonrt.dll libcodonrt.dll -Force
-          & build/codon_test.exe
+          # Two upstream cases assert POSIX-only behaviour and cannot pass on Windows:
+          #   test_python 8_python           - asserts os.name == 'posix' (Windows reports 'nt')
+          #   test_python 36_python_import_fn_2 - os.system("echo 'hello!'"), cmd.exe keeps the quotes
+          # Skipped here rather than editing the shared test files. This mirrors the
+          # per-platform filter test.sh already applies for darwin-x86_64.
+          & build/codon_test.exe --gtest_filter=-*_8_python:*_36_python_import_fn_2
           if ($LASTEXITCODE -ne 0) { throw "codon_test failed" }
 
       - name: Package
